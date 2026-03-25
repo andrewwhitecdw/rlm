@@ -117,6 +117,32 @@ export PRIME_API_KEY=...
 ### Model Providers
 We currently support most major clients (OpenAI, Anthropic), as well as the router platforms (OpenRouter, Portkey, LiteLLM). For local models, we recommend using vLLM (which interfaces with the [OpenAI client](https://github.com/alexzhang13/rlm/blob/main/rlm/clients/openai.py)). To view or add support for more clients, start by looking at [`rlm/clients/`](https://github.com/alexzhang13/rlm/tree/main/rlm/clients).
 
+#### Z.ai (GLM Models)
+To use [Z.ai](https://z.ai) models (GLM-4, GLM-5, etc.), set your API key and configure the OpenAI-compatible backend:
+```bash
+export ZAI_API_KEY=your-api-key
+```
+
+```python
+import os
+from rlm import RLM
+
+rlm = RLM(
+    backend="openai",
+    backend_kwargs={
+        "model_name": "glm-5",
+        "api_key": os.getenv("ZAI_API_KEY"),
+        "base_url": "https://api.z.ai/api/paas/v4/",
+    },
+    environment="local",
+    max_depth=1,
+    verbose=True,
+)
+
+result = rlm.completion("What is 2+2? Just give me the number.")
+print(result.response)  # Output: 4
+```
+
 ## Relevant Reading
 * **[Dec '25]** [Recursive Language Models arXiv](https://arxiv.org/abs/2512.24601)
 * **[Oct '25]** [Recursive Language Models Blogpost](https://alexzhang13.github.io/blog/2025/rlm/)

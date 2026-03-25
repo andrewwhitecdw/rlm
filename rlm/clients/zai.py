@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 from openai import AsyncOpenAI, OpenAI
@@ -5,40 +6,61 @@ from openai import AsyncOpenAI, OpenAI
 from rlm.clients.base_lm import BaseLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
 
+DEFAULT_ZAI_API_KEY = os.getenv("ZAI_API_KEY")
+DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
+
 
 class ZaiClient(BaseLM):
     """
     Client for Z.ai API (z.ai). Uses the OpenAI-compatible SDK with a custom base URL.
 
     Environment Variables:
-        ZAI_API_KEY: Z.ai API key (required)
+        ZAI_API_KEY: Z.ai API key (required if not passed explicitly)
 
     Example:
-        from rlm import LocalREPL
-        from rlm.clients import ZaiClient
+        from rlm import RLM
 
+        # Using backend="openai" with Z.ai base URL (recommended)
+        rlm = RLM(
+            backend="openai",
+            backend_kwargs={
+                "model_name": "glm-5",
+                "api_key": os.getenv("ZAI_API_KEY"),
+                "base_url": "https://api.z.ai/api/paas/v4/",
+            },
+        )
+        result = rlm.completion("What is 2+2?")
+        print(result.response)
+
+        # Or use the dedicated ZaiClient directly
+        from rlm.clients.zai import ZaiClient
         client = ZaiClient(api_key="your-key", model_name="glm-5")
-        repl = LocalREPL(lm_client=client)
-        result = repl.completion("Write code to sort an array")
+        response = client.completion("Hello!")
     """
 
     def __init__(
         self,
-        api_key: str,
+        api_key: str | None = None,
         model_name: str = "glm-5",
-        base_url: str = "https://api.z.ai/api/paas/v4/",
+        base_url: str = DEFAULT_ZAI_BASE_URL,
         **kwargs: Any,
     ):
         """
         Initialize Z.ai client.
 
         Args:
-            api_key: Z.ai API key
+            api_key: Z.ai API key (defaults to ZAI_API_KEY env var)
             model_name: Model name (default: glm-5)
             base_url: API base URL (default: https://api.z.ai/api/paas/v4/)
             **kwargs: Additional arguments passed to OpenAI client
         """
         super().__init__(model_name=model_name, **kwargs)
+
+        if api_key is None:
+            api_key = DEFAULT_ZAI_API_KEY
+        if api_key is None:
+            raise ValueError("Z.ai API key is required. Set ZAI_API_KEY env var or pass api_key.")
+
         self.api_key = api_key
         self.base_url = base_url
         self._client = OpenAI(api_key=api_key, base_url=base_url, **kwargs)
@@ -114,7 +136,7 @@ class ZaiClient(BaseLM):
         """
         if self._last_usage is None:
             return ModelUsageSummary(
-                model=self.model_name, calls=0, input_tokens=0, output_tokens=0
+                model=self.model_name, total_calls=0, total_input_tokens=0, total_output_tokens=0
             )
         return self._last_usage
 
