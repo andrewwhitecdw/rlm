@@ -459,25 +459,24 @@ class LocalREPL(NonIsolatedEnv):
 
     def _restore_scaffold(self) -> None:
         """Restore scaffold names after execution so overwrites (e.g. context = 'x') don't persist."""
+        restorers: dict[str, Callable[[], Any]] = {
+            "llm_query": lambda: self._llm_query,
+            "llm_query_batched": lambda: self._llm_query_batched,
+            "rlm_query": lambda: self._rlm_query,
+            "rlm_query_batched": lambda: self._rlm_query_batched,
+            "FINAL_VAR": lambda: self._final_var,
+            "SHOW_VARS": lambda: self._show_vars,
+        }
         for name in RESERVED_TOOL_NAMES:
-            if name == "llm_query":
-                self.globals["llm_query"] = self._llm_query
-            elif name == "llm_query_batched":
-                self.globals["llm_query_batched"] = self._llm_query_batched
-            elif name == "rlm_query":
-                self.globals["rlm_query"] = self._rlm_query
-            elif name == "rlm_query_batched":
-                self.globals["rlm_query_batched"] = self._rlm_query_batched
-            elif name == "FINAL_VAR":
-                self.globals["FINAL_VAR"] = self._final_var
-            elif name == "SHOW_VARS":
-                self.globals["SHOW_VARS"] = self._show_vars
+            if name in restorers:
+                self.globals[name] = restorers[name]()
             elif name == "context" and "context_0" in self.locals:
                 self.locals["context"] = self.locals["context_0"]
-            elif name == "history" and "history_0" in self.locals and not self.compaction:
-                self.locals["history"] = self.locals["history_0"]
-            elif name == "history" and self.compaction:
-                self.locals["history"] = self._compaction_history
+            elif name == "history":
+                if self.compaction:
+                    self.locals["history"] = self._compaction_history
+                elif "history_0" in self.locals:
+                    self.locals["history"] = self.locals["history_0"]
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""
@@ -535,5 +534,4 @@ class LocalREPL(NonIsolatedEnv):
         if hasattr(self, "locals"):
             self.locals.clear()
 
-    def __del__(self):
-        self.cleanup()
+

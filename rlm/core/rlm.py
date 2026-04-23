@@ -109,7 +109,7 @@ class RLM:
         """
         # Store config for spawning per-completion
         self.backend = backend
-        self.backend_kwargs = backend_kwargs
+        self.backend_kwargs = (backend_kwargs or {}).copy()
         self.environment_type = environment
         self.environment_kwargs = (
             environment_kwargs.copy() if environment_kwargs is not None else {}

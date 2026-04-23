@@ -136,7 +136,7 @@ class ZaiClient(BaseLM):
         """
         if self._last_usage is None:
             return ModelUsageSummary(
-                model=self.model_name, total_calls=0, total_input_tokens=0, total_output_tokens=0
+                total_calls=0, total_input_tokens=0, total_output_tokens=0
             )
         return self._last_usage
 

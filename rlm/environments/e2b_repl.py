@@ -5,9 +5,7 @@ Uses the E2B Code Interpreter SDK (https://e2b.dev/docs) for sandbox management.
 Follows the same HTTP broker pattern as ModalREPL for LLM communication.
 """
 
-import base64
 import json
-import textwrap
 import threading
 import time
 from typing import Any
@@ -20,243 +18,14 @@ from rlm.core.types import REPLResult, RLMChatCompletion
 from rlm.environments.base_env import IsolatedEnv
 
 # =============================================================================
-# Broker Server Script (runs inside sandbox, handles LLM request queue)
-# =============================================================================
-
-_BROKER_SCRIPT = textwrap.dedent(
-    '''
-import json
-import threading
-import uuid
-from flask import Flask, request, jsonify
-
-app = Flask(__name__)
-
-# Request queue: {request_id: {"request": {...}, "response": None, "event": Event}}
-pending_requests = {}
-lock = threading.Lock()
-
-@app.route("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-@app.route("/enqueue", methods=["POST"])
-def enqueue():
-    """Called by sandbox code to submit an LLM request and wait for response."""
-    data = request.json
-    request_id = str(uuid.uuid4())
-    event = threading.Event()
-
-    with lock:
-        pending_requests[request_id] = {
-            "request": data,
-            "response": None,
-            "event": event,
-        }
-
-    # Wait for response (with timeout)
-    event.wait(timeout=300)
-
-    with lock:
-        entry = pending_requests.pop(request_id, None)
-
-    if entry and entry["response"] is not None:
-        return jsonify(entry["response"])
-    else:
-        return jsonify({"error": "Request timed out"}), 504
-
-@app.route("/pending")
-def get_pending():
-    """Called by E2BREPL to get pending requests."""
-    with lock:
-        pending = [
-            {"id": rid, "request": entry["request"]}
-            for rid, entry in pending_requests.items()
-            if entry["response"] is None
-        ]
-    return jsonify({"pending": pending})
-
-@app.route("/respond", methods=["POST"])
-def respond():
-    """Called by E2BREPL to submit a response."""
-    data = request.json
-    request_id = data.get("id")
-    response = data.get("response")
-
-    with lock:
-        if request_id in pending_requests:
-            pending_requests[request_id]["response"] = response
-            pending_requests[request_id]["event"].set()
-            return jsonify({"status": "ok"})
-
-    return jsonify({"error": "Request not found"}), 404
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8889, threaded=True)
-'''
-)
-
-
-# =============================================================================
 # Execution Script (runs inside the sandbox for each code block)
 # =============================================================================
 
 
-def _build_exec_script(code: str, broker_port: int = 8888) -> str:
-    """
-    Build a script that executes code with state persistence.
-    LLM queries go through the local broker server.
-    """
-    code_b64 = base64.b64encode(code.encode()).decode()
+def _build_exec_script(code: str, broker_port: int = 8888, depth: int = 1) -> str:
+    from rlm.environments._exec_templates import build_broker_exec_script
 
-    return textwrap.dedent(
-        f'''
-import sys
-import io
-import json
-import base64
-import traceback
-import os
-import requests
-
-try:
-    import dill
-except ImportError:
-    import pickle as dill
-
-# =============================================================================
-# LLM Query Functions (via local broker)
-# =============================================================================
-
-BROKER_URL = "http://127.0.0.1:{broker_port}"
-
-def llm_query(prompt, model=None):
-    """Query the LM via the broker."""
-    try:
-        response = requests.post(
-            f"{{BROKER_URL}}/enqueue",
-            json={{"type": "single", "prompt": prompt, "model": model}},
-            timeout=300,
-        )
-        data = response.json()
-        if data.get("error"):
-            return f"Error: {{data['error']}}"
-        return data.get("response", "Error: No response")
-    except Exception as e:
-        return f"Error: LM query failed - {{e}}"
-
-
-def llm_query_batched(prompts, model=None):
-    """Query the LM with multiple prompts."""
-    try:
-        response = requests.post(
-            f"{{BROKER_URL}}/enqueue",
-            json={{"type": "batched", "prompts": prompts, "model": model}},
-            timeout=300,
-        )
-        data = response.json()
-        if data.get("error"):
-            return [f"Error: {{data['error']}}"] * len(prompts)
-        return data.get("responses", ["Error: No response"] * len(prompts))
-    except Exception as e:
-        return [f"Error: LM query failed - {{e}}"] * len(prompts)
-
-
-# =============================================================================
-# State Management
-# =============================================================================
-
-STATE_FILE = "/tmp/rlm_state.dill"
-
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "rb") as f:
-                return dill.load(f)
-        except:
-            pass
-    return {{}}
-
-def save_state(state):
-    clean_state = {{}}
-    for k, v in state.items():
-        if k.startswith("_"):
-            continue
-        try:
-            dill.dumps(v)
-            clean_state[k] = v
-        except:
-            pass
-    with open(STATE_FILE, "wb") as f:
-        dill.dump(clean_state, f)
-
-def serialize_locals(state):
-    result = {{}}
-    for k, v in state.items():
-        if k.startswith("_"):
-            continue
-        try:
-            result[k] = repr(v)
-        except:
-            result[k] = f"<{{type(v).__name__}}>"
-    return result
-
-# =============================================================================
-# Execution
-# =============================================================================
-
-_locals = load_state()
-
-def FINAL_VAR(variable_name):
-    variable_name = variable_name.strip().strip("\\"\\'")
-    if variable_name in _locals:
-        return str(_locals[variable_name])
-    return f"Error: Variable '{{variable_name}}' not found"
-
-_globals = {{
-    "__builtins__": __builtins__,
-    "__name__": "__main__",
-    "llm_query": llm_query,
-    "llm_query_batched": llm_query_batched,
-    "FINAL_VAR": FINAL_VAR,
-}}
-
-code = base64.b64decode("{code_b64}").decode()
-
-stdout_buf = io.StringIO()
-stderr_buf = io.StringIO()
-old_stdout, old_stderr = sys.stdout, sys.stderr
-
-try:
-    sys.stdout = stdout_buf
-    sys.stderr = stderr_buf
-    combined = {{**_globals, **_locals}}
-    exec(code, combined, combined)
-    for key, value in combined.items():
-        if key not in _globals and not key.startswith("_"):
-            _locals[key] = value
-except Exception as e:
-    traceback.print_exc(file=stderr_buf)
-finally:
-    sys.stdout = old_stdout
-    sys.stderr = old_stderr
-
-# Restore scaffold aliases if overwritten by executed code
-if "context_0" in _locals:
-    _locals["context"] = _locals["context_0"]
-if "history_0" in _locals:
-    _locals["history"] = _locals["history_0"]
-
-save_state(_locals)
-
-result = {{
-    "stdout": stdout_buf.getvalue(),
-    "stderr": stderr_buf.getvalue(),
-    "locals": serialize_locals(_locals),
-}}
-print(json.dumps(result))
-'''
-    )
+    return build_broker_exec_script(code, broker_port, depth)
 
 
 class E2BREPL(IsolatedEnv):
@@ -319,7 +88,9 @@ class E2BREPL(IsolatedEnv):
         self.sandbox.commands.run("pip install flask requests dill")
 
         # Write the broker script to the sandbox
-        self.sandbox.files.write("/tmp/broker.py", _BROKER_SCRIPT)
+        from rlm.environments._exec_templates import build_broker_script
+
+        self.sandbox.files.write("/tmp/broker.py", build_broker_script(self.BROKER_PORT))
 
         # Start the broker as a background process
         self.broker_process = self.sandbox.commands.run(
@@ -384,9 +155,7 @@ class E2BREPL(IsolatedEnv):
                         timeout=10,
                     )
 
-            except requests.exceptions.RequestException:
-                pass
-            except Exception:
+            except (requests.exceptions.RequestException, json.JSONDecodeError, KeyError):
                 pass
 
             time.sleep(0.1)
@@ -398,7 +167,7 @@ class E2BREPL(IsolatedEnv):
 
         if req_type == "single":
             prompt = req_data.get("prompt")
-            request = LMRequest(prompt=prompt, model=model)
+            request = LMRequest(prompt=prompt, model=model, depth=self.depth)
             response = send_lm_request(self.lm_handler_address, request)
 
             if not response.success:
@@ -412,7 +181,7 @@ class E2BREPL(IsolatedEnv):
 
         elif req_type == "batched":
             prompts = req_data.get("prompts", [])
-            responses = send_lm_request_batched(self.lm_handler_address, prompts, model=model)
+            responses = send_lm_request_batched(self.lm_handler_address, prompts, model=model, depth=self.depth)
 
             results = []
             for resp in responses:
@@ -448,7 +217,7 @@ class E2BREPL(IsolatedEnv):
             self.pending_llm_calls.clear()
 
         # Build and write the script to sandbox
-        script = _build_exec_script(code, self.BROKER_PORT)
+        script = _build_exec_script(code, self.BROKER_PORT, self.depth)
         self.sandbox.files.write("/tmp/run_script.py", script)
 
         # Run the script
@@ -508,5 +277,4 @@ class E2BREPL(IsolatedEnv):
         self.cleanup()
         return False
 
-    def __del__(self):
-        self.cleanup()
+

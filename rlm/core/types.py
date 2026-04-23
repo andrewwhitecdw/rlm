@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Any, Literal
@@ -167,7 +168,7 @@ class REPLResult:
         stdout: str,
         stderr: str,
         locals: dict,
-        execution_time: float = None,
+        execution_time: float | None = None,
         rlm_calls: list["RLMChatCompletion"] = None,
         final_answer: str | None = None,
     ):
@@ -275,8 +276,6 @@ class QueryMetadata:
                     self.context_lengths.append(len(chunk))
                     continue
                 try:
-                    import json
-
                     self.context_lengths.append(len(json.dumps(chunk, default=str)))
                 except Exception:
                     self.context_lengths.append(len(repr(chunk)))
@@ -292,8 +291,6 @@ class QueryMetadata:
                     self.context_lengths = []
                     for chunk in prompt:
                         try:
-                            import json
-
                             self.context_lengths.append(len(json.dumps(chunk, default=str)))
                         except Exception:
                             self.context_lengths.append(len(repr(chunk)))

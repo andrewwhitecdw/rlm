@@ -14,7 +14,8 @@ def get_client(
 ) -> BaseLM:
     """
     Routes a specific backend and the args (as a dict) to the appropriate client if supported.
-    Currently supported backends: ['openai']
+    Currently supported backends: ['openai', 'vllm', 'portkey', 'openrouter', 'litellm',
+    'anthropic', 'azure_openai', 'gemini', 'vercel', 'zai']
     """
     if backend == "openai":
         from rlm.clients.openai import OpenAIClient
