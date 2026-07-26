@@ -52,8 +52,8 @@ prompt = (
     "Step 6: Compute the standard deviation of each group. Print all four. "
     "Store as `s1`, `s2`, `s3`, `s4`.\n\n"
     "Step 7: You previously computed four means and four standard deviations. "
-    "Compute final_answer = round((m1 + m2 + m3 + m4) / (s1 + s2 + s3 + s4), 4). "
-    "Print the full equation with values and call FINAL_VAR(final_answer)."
+    "Compute final_value = round((m1 + m2 + m3 + m4) / (s1 + s2 + s3 + s4), 4). "
+    "Print the full equation with values, then set answer['content'] = final_value and answer['ready'] = True."
 )
 
 result = rlm.completion(prompt, root_prompt=prompt)

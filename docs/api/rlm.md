@@ -71,7 +71,7 @@ RLM(
 #### `backend`
 {: .no_toc }
 
-**Type:** `Literal["openai", "portkey", "openrouter", "vllm", "litellm", "anthropic"]`
+**Type:** `Literal["openai", "portkey", "openrouter", "vllm", "anthropic"]`
 **Default:** `"openai"`
 
 The LM provider backend to use for the root model.
@@ -104,7 +104,7 @@ Configuration passed to the LM client. Required fields vary by backend:
 | `portkey` | `model_name`, `api_key` | `base_url` |
 | `openrouter` | `model_name` | `api_key` |
 | `vllm` | `model_name`, `base_url` | — |
-| `litellm` | `model_name` | varies by provider |
+
 
 ```python
 backend_kwargs = {
@@ -255,12 +255,15 @@ Override the default RLM system prompt. The default prompt instructs the LM on:
 - How to use the `context` variable
 - How to call `llm_query()` / `llm_query_batched()` for plain LM calls
 - How to call `rlm_query()` / `rlm_query_batched()` for recursive sub-calls
-- How to signal completion with `FINAL()` or `FINAL_VAR()`
+- How to signal completion by setting `answer["content"]` and `answer["ready"] = True`
 
 ```python
 custom_prompt = """You are a data analysis expert.
 Use the REPL to analyze the context variable.
-When done, output FINAL(your answer)."""
+When done, run a ```repl``` block that does:
+    answer["content"] = "your final answer here"
+    answer["ready"] = True
+"""
 
 rlm = RLM(..., custom_system_prompt=custom_prompt)
 ```
@@ -372,7 +375,7 @@ custom_tools = {
 }
 ```
 
-Reserved names (`llm_query`, `rlm_query`, `context`, `history`, `FINAL_VAR`, `SHOW_VARS`, and their batched variants) cannot be used as tool names.
+Reserved names (`llm_query`, `rlm_query`, `context`, `history`, `answer`, `SHOW_VARS`, and their batched variants) cannot be used as tool names.
 
 ---
 
@@ -547,10 +550,10 @@ The following functions are available to model-generated code inside the REPL:
 | Function | Description |
 |:---------|:------------|
 | `llm_query(prompt, model=None)` | Single plain LM completion. Fast, no REPL or iteration. |
-| `llm_query_batched(prompts, model=None)` | Multiple plain LM completions concurrently. |
+| `llm_query_batched(prompts, model=None)` | Multiple plain LM completions concurrently. A single failed call doesn't fail the batch — that slot returns `"Error: llm() call failed - <msg>"`, the rest return normally. |
 | `rlm_query(prompt, model=None)` | Spawn a child RLM with its own REPL for deeper thinking. Falls back to `llm_query` at max depth. |
 | `rlm_query_batched(prompts, model=None)` | Spawn multiple child RLMs. Falls back to `llm_query_batched` at max depth. |
-| `FINAL_VAR(variable_name)` | Return a REPL variable as the final answer. |
+| `answer` | A dict (`{"content": "", "ready": False}`). Set `answer["content"]` to your final answer and `answer["ready"] = True` to terminate the run. |
 | `SHOW_VARS()` | List all user-created variables in the REPL. |
 | `print(...)` | Print output visible to the model in the next iteration. |
 
@@ -570,7 +573,7 @@ rlm = RLM(backend="unknown")
 # Raises: ValueError: Unknown backend: unknown
 ```
 
-If the RLM exhausts `max_iterations` without finding a `FINAL()` / `FINAL_VAR()` answer, it prompts the LM one more time to provide a final answer based on the conversation history.
+If the RLM exhausts `max_iterations` without the model setting `answer["ready"] = True`, it prompts the LM one more time to provide a final answer based on the conversation history.
 
 RLM raises explicit exceptions when limits are exceeded:
 

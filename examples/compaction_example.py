@@ -56,7 +56,7 @@ prompt = (
     "Step 4: Compute and print the mean, median, min, max, and standard deviation "
     "of `data_b`. Store the mean as `mean_b`.\n\n"
     "Step 5: You previously computed `mean_a` and `mean_b`. "
-    "Compute final_answer = round(mean_a + mean_b, 2) and call FINAL_VAR(final_answer)."
+    "Compute final_value = round(mean_a + mean_b, 2), then set answer['content'] = final_value and answer['ready'] = True."
 )
 
 result = rlm.completion(prompt, root_prompt=prompt)

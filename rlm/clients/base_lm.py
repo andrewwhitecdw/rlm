@@ -13,9 +13,19 @@ class BaseLM(ABC):
     does so in a model-agnostic way, so this class provides a base interface for all language models.
     """
 
-    def __init__(self, model_name: str, timeout: float = DEFAULT_TIMEOUT, **kwargs):
+    def __init__(
+        self,
+        model_name: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        sampling_args: dict[str, Any] | None = None,
+        **kwargs,
+    ):
         self.model_name = model_name
         self.timeout = timeout
+        # Sampling args forwarded to the underlying completion API
+        # (e.g. temperature, top_p, max_tokens, seed). Forwarded by
+        # subclasses as **self.sampling_args.
+        self.sampling_args: dict[str, Any] = dict(sampling_args or {})
         self.kwargs = kwargs
 
     @abstractmethod

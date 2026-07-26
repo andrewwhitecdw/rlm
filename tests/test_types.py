@@ -135,11 +135,11 @@ class TestRLMIteration:
     def test_with_final_answer(self):
         iteration = RLMIteration(
             prompt="test",
-            response="FINAL(42)",
+            response="42",
             code_blocks=[],
-            final_answer=("FINAL", "42"),
+            final_answer="42",
         )
-        assert iteration.final_answer == ("FINAL", "42")
+        assert iteration.final_answer == "42"
 
     def test_to_dict(self):
         result = REPLResult(stdout="", stderr="", locals={})

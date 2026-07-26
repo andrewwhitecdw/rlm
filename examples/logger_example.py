@@ -29,7 +29,7 @@ rlm = RLM(
     verbose=True,
 )
 
-prompt = "Compute the sum 1 + 2 + 3 + 4 + 5 and print the result using a REPL block, then return it with FINAL_VAR."
+prompt = "Compute the sum 1 + 2 + 3 + 4 + 5 and print the result using a REPL block, then set answer['content'] to the sum and answer['ready'] = True."
 result = rlm.completion(prompt)
 
 print("Response:", result.response)

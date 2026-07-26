@@ -3,12 +3,8 @@ Parsing utilities for RLM trjaectories.
 """
 
 import re
-from typing import TYPE_CHECKING
 
 from rlm.core.types import REPLResult, RLMIteration
-
-if TYPE_CHECKING:
-    from rlm.environments.base_env import BaseEnv
 
 
 def find_code_blocks(text: str) -> list[str]:
@@ -26,50 +22,6 @@ def find_code_blocks(text: str) -> list[str]:
     return results
 
 
-def find_final_answer(text: str, environment: "BaseEnv | None" = None) -> str | None:
-    """
-    Find FINAL(...) or FINAL_VAR(...) statement in response and return the final answer string.
-
-    If FINAL_VAR is found and an environment is provided, executes code to retrieve the variable value.
-    Returns None if neither pattern is found.
-
-    Args:
-        text: The response text to parse
-        environment: Optional environment to execute code for FINAL_VAR retrieval
-
-    Returns:
-        The final answer string, or None if no final answer pattern is found
-    """
-    # Check for FINAL_VAR pattern first - must be at start of line
-    final_var_pattern = r"^\s*FINAL_VAR\((.*?)\)"
-    match = re.search(final_var_pattern, text, re.MULTILINE | re.DOTALL)
-    if match:
-        variable_name = match.group(1).strip().strip('"').strip("'")
-        if environment is not None:
-            result = environment.execute_code(f"print(FINAL_VAR({variable_name!r}))")
-            final_answer = result.stdout.strip()
-            if final_answer == "":
-                return None
-            # Don't treat FINAL_VAR "variable not found" as final answer (so RLM continues)
-            if (
-                "Variable '" in final_answer
-                and "' not found" in final_answer
-                and "FINAL_VAR" in final_answer
-            ):
-                return None
-            return final_answer
-        return None
-
-    # Check for FINAL pattern - must be at start of line
-    # Use greedy matching to capture content with nested parentheses
-    final_pattern = r"^\s*FINAL\((.*)\)\s*$"
-    match = re.search(final_pattern, text, re.MULTILINE | re.DOTALL)
-    if match:
-        return match.group(1).strip()
-
-    return None
-
-
 def format_iteration(
     iteration: RLMIteration, max_character_length: int = 20000
 ) -> list[dict[str, str]]:
@@ -78,30 +30,42 @@ def format_iteration(
     the prompt of the LM in the next iteration. We also truncate code execution results
     that exceed the max_character_length.
 
+    Each iteration produces exactly two messages in history: one assistant
+    turn containing the model's response (with any ```repl``` blocks
+    embedded), followed by a single user message that concatenates the
+    outputs of all executed code blocks in that turn. This keeps the
+    per-turn shape assistant-then-user even when the model emits several
+    blocks in one response, and avoids redundantly echoing the code
+    (which is already in the assistant message) back in the user reply.
+    Each block's output is still individually truncated at
+    ``max_character_length``.
+
     Args:
         iteration: The iteration to format
-        max_character_length: The maximum character length of the result
+        max_character_length: Per-block cap on the formatted execution
+            result. Longer outputs are tail-trimmed.
 
     Returns:
-        A list of messages to add to the next prompt
+        A list of messages to add to the next prompt — always length 1
+        (just the assistant) when no code was run, or length 2 (assistant
+        + one combined user reply) otherwise.
     """
     messages = [{"role": "assistant", "content": iteration.response}]
 
-    for code_block in iteration.code_blocks:
-        code = code_block.code
-        result = code_block.result
-        result = format_execution_result(result)
+    parts = []
+    multi = len(iteration.code_blocks) > 1
+    for i, code_block in enumerate(iteration.code_blocks):
+        result = format_execution_result(code_block.result)
         if len(result) > max_character_length:
             result = (
                 result[:max_character_length]
                 + f"... + [{len(result) - max_character_length} chars...]"
             )
+        header = f"REPL output (block {i + 1}):" if multi else "REPL output:"
+        parts.append(f"{header}\n{result}")
 
-        execution_message = {
-            "role": "user",
-            "content": f"Code executed:\n```python\n{code}\n```\n\nREPL output:\n{result}",
-        }
-        messages.append(execution_message)
+    if parts:
+        messages.append({"role": "user", "content": "\n\n".join(parts)})
     return messages
 
 
@@ -141,12 +105,6 @@ def format_execution_result(result: REPLResult) -> str:
         result_parts.append(f"REPL variables: {list(important_vars.keys())}\n")
 
     return "\n\n".join(result_parts) if result_parts else "No output"
-
-
-def check_for_final_answer(response: str, repl_env, logger) -> str | None:
-    """Check if response contains a final answer."""
-    # Use the new find_final_answer function which handles both FINAL and FINAL_VAR
-    return find_final_answer(response, environment=repl_env)
 
 
 def convert_context_for_repl(context):

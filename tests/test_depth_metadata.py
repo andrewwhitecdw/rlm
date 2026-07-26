@@ -36,6 +36,11 @@ def create_mock_lm(responses: list[str], model_name: str = "mock-model") -> Mock
     return mock
 
 
+def final(content: str) -> str:
+    """Render a model response that submits ``content`` as the final answer."""
+    return f"```repl\nanswer['content'] = {content!r}\nanswer['ready'] = True\n```"
+
+
 # ========================================================================
 # depth=1 tests: verify existing behavior is preserved
 # ========================================================================
@@ -45,9 +50,9 @@ class TestDepth1CompletionLoop:
     """Verify depth=1 completion loop works identically to before refactoring."""
 
     def test_basic_completion_with_final_answer(self):
-        """depth=1 RLM should complete normally with FINAL() answer."""
+        """depth=1 RLM should complete normally when the model sets answer['ready'] = True."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(42)"])
+            mock_lm = create_mock_lm([final("42")])
             mock_get_client.return_value = mock_lm
 
             rlm = RLM(
@@ -60,13 +65,13 @@ class TestDepth1CompletionLoop:
             assert result.root_model == "test-model"
 
     def test_multi_iteration_before_final(self):
-        """depth=1 should iterate multiple times before finding FINAL()."""
+        """depth=1 should iterate multiple times before the model signals ready."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(
                 [
                     "Let me think...\n```repl\nx = 1 + 1\nprint(x)\n```",
                     "Now I know.\n```repl\ny = x * 2\nprint(y)\n```",
-                    "FINAL(4)",
+                    final("4"),
                 ]
             )
             mock_get_client.return_value = mock_lm
@@ -82,7 +87,7 @@ class TestDepth1CompletionLoop:
     def test_no_subcall_fn_at_depth_1(self):
         """depth=1 (max_depth=1) should NOT pass subcall_fn to environment."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(done)"])
+            mock_lm = create_mock_lm([final("done")])
             mock_get_client.return_value = mock_lm
 
             rlm = RLM(
@@ -109,7 +114,7 @@ class TestDepth1CompletionLoop:
     def test_subcall_fn_passed_at_depth_gt_1(self):
         """max_depth>1 SHOULD pass subcall_fn to environment."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(done)"])
+            mock_lm = create_mock_lm([final("done")])
             mock_get_client.return_value = mock_lm
 
             rlm = RLM(
@@ -314,7 +319,7 @@ class TestDepth1LoggerMetadata:
     def test_completion_returns_metadata_with_logger(self):
         """When logger is provided, completion result should have metadata."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(42)"])
+            mock_lm = create_mock_lm([final("42")])
             mock_get_client.return_value = mock_lm
 
             logger = RLMLogger()
@@ -335,7 +340,7 @@ class TestDepth1LoggerMetadata:
     def test_completion_returns_no_metadata_without_logger(self):
         """When no logger is provided, metadata should be None."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(42)"])
+            mock_lm = create_mock_lm([final("42")])
             mock_get_client.return_value = mock_lm
 
             rlm = RLM(
@@ -353,7 +358,7 @@ class TestDepth1LoggerMetadata:
                 [
                     "Let me compute.\n```repl\nx = 1\n```",
                     "More work.\n```repl\ny = 2\n```",
-                    "FINAL(done)",
+                    final("done"),
                 ]
             )
             mock_get_client.return_value = mock_lm
@@ -391,7 +396,7 @@ class TestSubcallLoggerPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             logger = RLMLogger()
@@ -426,7 +431,7 @@ class TestSubcallLoggerPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -469,7 +474,7 @@ class TestSubcallLoggerPropagation:
         """When child RLM completes with a logger, the returned RLMChatCompletion should have metadata."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
             # Need enough responses: parent init + child init + child completion
-            mock_lm = create_mock_lm(["FINAL(child answer)"] * 5, model_name="test-model")
+            mock_lm = create_mock_lm([final("child answer")] * 5, model_name="test-model")
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -506,7 +511,7 @@ class TestSubcallCustomToolsPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             my_tool = lambda x: x * 2  # noqa: E731
@@ -538,7 +543,7 @@ class TestSubcallCustomToolsPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(

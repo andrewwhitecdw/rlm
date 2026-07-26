@@ -31,6 +31,11 @@ def create_mock_lm(responses: list[str], model_name: str = "mock-model") -> Mock
     return mock
 
 
+def final(content: str) -> str:
+    """Render a model response that submits ``content`` as the final answer."""
+    return f"```repl\nanswer['content'] = {content!r}\nanswer['ready'] = True\n```"
+
+
 class TestSubcallTimeoutPropagation:
     """Tests for max_timeout propagation to child RLM."""
 
@@ -48,7 +53,7 @@ class TestSubcallTimeoutPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             # Create parent RLM with max_timeout
@@ -87,7 +92,7 @@ class TestSubcallTimeoutPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -107,7 +112,7 @@ class TestSubcallTimeoutPropagation:
     def test_subcall_returns_error_when_timeout_exhausted(self):
         """When timeout is already exhausted, _subcall should return error message."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -142,7 +147,7 @@ class TestSubcallTokensPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -171,7 +176,7 @@ class TestSubcallTokensPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -204,7 +209,7 @@ class TestSubcallErrorsPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -233,7 +238,7 @@ class TestSubcallErrorsPropagation:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -266,7 +271,7 @@ class TestSubcallModelOverride:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -299,7 +304,7 @@ class TestSubcallModelOverride:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -330,7 +335,7 @@ class TestSubcallModelOverride:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(
@@ -396,7 +401,7 @@ class TestSubcallModelOverrideAtLeafDepth:
     def test_leaf_depth_without_model_override_uses_parent_model(self):
         """When at max_depth without model override, uses parent's model."""
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"] * 2 + ["leaf response"])
+            mock_lm = create_mock_lm([final("answer")] * 2 + ["leaf response"])
             mock_get_client.return_value = mock_lm
 
             # Parent at depth 1, max_depth 2 means next depth (2) will be at max_depth
@@ -438,7 +443,7 @@ class TestSubcallCombinedParameters:
                 super().__init__(*args, **kwargs)
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
-            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_lm = create_mock_lm([final("answer")])
             mock_get_client.return_value = mock_lm
 
             parent = RLM(

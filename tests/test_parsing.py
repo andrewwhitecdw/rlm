@@ -1,13 +1,10 @@
 """Tests for parsing utilities."""
 
-from unittest.mock import Mock
-
 from rlm.core.types import CodeBlock, REPLResult, RLMIteration
 from rlm.environments.local_repl import LocalREPL
 from rlm.utils.parsing import (
     convert_context_for_repl,
     find_code_blocks,
-    find_final_answer,
     format_execution_result,
     format_iteration,
 )
@@ -78,205 +75,44 @@ print(result)
         assert "return n * factorial(n - 1)" in blocks[0]
 
 
-class TestFindFinalAnswer:
-    """Tests for find_final_answer function."""
+class TestAnswerDictFinalAnswer:
+    """Tests for the ``answer`` dict completion signal surfaced via REPLResult.final_answer."""
 
-    def test_final_answer(self):
-        text = "The answer is:\nFINAL(42)"
-        result = find_final_answer(text)
-        assert result == "42"
-
-    def test_final_var_answer(self):
-        text = "Check the variable:\nFINAL_VAR(result)"
-        # Create a mock environment that returns the variable value
-        mock_env = Mock()
-        mock_env.execute_code.return_value = REPLResult(stdout="42", stderr="", locals={})
-        result = find_final_answer(text, environment=mock_env)
-        assert result == "42"
-        # Verify execute_code was called with the correct code
-        mock_env.execute_code.assert_called_once()
-        call_args = mock_env.execute_code.call_args[0][0]
-        assert "FINAL_VAR('result')" in call_args or 'FINAL_VAR("result")' in call_args
-
-    def test_final_var_without_environment(self):
-        text = "Check the variable:\nFINAL_VAR(result)"
-        # Without environment, FINAL_VAR should return None
-        result = find_final_answer(text)
-        assert result is None
-
-    def test_no_final_answer(self):
-        text = "Still working on the problem..."
-        result = find_final_answer(text)
-        assert result is None
-
-    def test_final_with_multiline_content(self):
-        text = """FINAL(This is a
-multiline answer)"""
-        result = find_final_answer(text)
-        assert result is not None
-        assert "multiline" in result
-        assert "This is a" in result
-
-    def test_final_must_be_at_start_of_line(self):
-        # FINAL not at start of line should not match
-        text = "The result is FINAL(42)"
-        result = find_final_answer(text)
-        assert result is None
-
-    def test_final_with_whitespace(self):
-        text = "   FINAL(answer with spaces)"
-        result = find_final_answer(text)
-        assert result == "answer with spaces"
-
-    def test_final_with_nested_parentheses_greedy_matching(self):
-        """Test that greedy matching captures content with nested parentheses correctly.
-        Greedy matching (.*) matches to the last closing parenthesis, correctly handling
-        nested parentheses in FINAL() content. Non-greedy (.*?) would incorrectly stop
-        at the first closing parenthesis, breaking functions, tuples, and nested structures.
-        """
-        # Function call with nested parentheses
-        text = "FINAL(func(arg1, arg2))"
-        result = find_final_answer(text)
-        assert result == "func(arg1, arg2)"
-
-        # List and tuple with multiple closing parentheses
-        text = "FINAL([1, 2, 3], (4, 5))"
-        result = find_final_answer(text)
-        assert result == "[1, 2, 3], (4, 5)"
-
-        # Complex nested dictionary
-        text = "FINAL({'key': 'value', 'nested': {'a': 1, 'b': 2}})"
-        result = find_final_answer(text)
-        assert "'key': 'value'" in result
-        assert "'nested':" in result
-
-        # Multiple function calls with nested parentheses
-        text = "FINAL(calculate(10, 20) + process(data))"
-        result = find_final_answer(text)
-        assert result == "calculate(10, 20) + process(data)"
-
-    def test_final_and_final_var_parsing(self):
-        """Test that both FINAL and FINAL_VAR patterns are parsed correctly."""
-        # Test FINAL with various content types
-        test_cases_final = [
-            ("FINAL(42)", "42"),
-            ("FINAL('hello world')", "'hello world'"),
-            ('FINAL("test")', '"test"'),
-            ("FINAL(123.45)", "123.45"),
-            ("FINAL([1, 2, 3])", "[1, 2, 3]"),
-        ]
-
-        for text, expected in test_cases_final:
-            result = find_final_answer(text)
-            assert result == expected, f"Failed for text: {text}"
-
-        # Test FINAL_VAR with environment
-        mock_env = Mock()
-        mock_env.execute_code.return_value = REPLResult(
-            stdout="computed_result", stderr="", locals={}
-        )
-
-        test_cases_final_var = [
-            ("FINAL_VAR(result)", "result"),
-            ("FINAL_VAR('my_var')", "my_var"),
-            ('FINAL_VAR("another_var")', "another_var"),
-            ("FINAL_VAR(answer)", "answer"),
-        ]
-
-        for text, var_name in test_cases_final_var:
-            result = find_final_answer(text, environment=mock_env)
-            assert result == "computed_result", f"Failed for text: {text}"
-            # Verify the variable name was extracted correctly
-            call_args = mock_env.execute_code.call_args[0][0]
-            assert (
-                var_name in call_args
-                or f"'{var_name}'" in call_args
-                or f'"{var_name}"' in call_args
-            )
-
-    def test_final_var_takes_precedence_over_final(self):
-        """Test that FINAL_VAR is checked first and takes precedence over FINAL."""
-        mock_env = Mock()
-        mock_env.execute_code.return_value = REPLResult(stdout="var_value", stderr="", locals={})
-
-        # If both appear, FINAL_VAR should be found first (checked first in the function)
-        text = "FINAL_VAR(result)\nFINAL(direct_answer)"
-        result = find_final_answer(text, environment=mock_env)
-        assert result == "var_value"  # FINAL_VAR should be returned
-
-        # Without environment, FINAL_VAR pattern is found but returns None (no fallback to FINAL)
-        # This is expected behavior - FINAL_VAR takes precedence when found
-        result = find_final_answer(text)
-        assert result is None  # FINAL_VAR found but no environment, so returns None
-
-        # Test that FINAL alone works when FINAL_VAR is not present
-        text_final_only = "FINAL(direct_answer)"
-        result = find_final_answer(text_final_only)
-        assert result == "direct_answer"
-
-    def test_final_var_retrieves_actual_variables_from_environment(self):
-        """Test that FINAL_VAR actually retrieves variables from a real code environment."""
-        # Create a real LocalREPL environment
+    def test_answer_dict_ready_true_sets_final_answer(self):
+        """Setting ``answer['ready'] = True`` must populate REPLResult.final_answer."""
         env = LocalREPL()
-
         try:
-            # Execute code to create variables with different types
-            env.execute_code("x = 42")
-            env.execute_code("result = 'hello world'")
-            env.execute_code("answer = [1, 2, 3, 4, 5]")
-            env.execute_code("computed = 10 * 5 + 2")
-            env.execute_code("nested = {'key': 'value', 'num': 123}")
-
-            # Test retrieving integer variable
-            text = "FINAL_VAR(x)"
-            result = find_final_answer(text, environment=env)
-            assert result == "42", f"Expected '42', got '{result}'"
-
-            # Test retrieving string variable
-            text = "FINAL_VAR(result)"
-            result = find_final_answer(text, environment=env)
-            assert result == "hello world", f"Expected 'hello world', got '{result}'"
-
-            # Test retrieving list variable
-            text = "FINAL_VAR(answer)"
-            result = find_final_answer(text, environment=env)
-            assert result == "[1, 2, 3, 4, 5]", f"Expected '[1, 2, 3, 4, 5]', got '{result}'"
-
-            # Test retrieving computed variable
-            text = "FINAL_VAR(computed)"
-            result = find_final_answer(text, environment=env)
-            assert result == "52", f"Expected '52', got '{result}'"
-
-            # Test retrieving dictionary variable
-            text = "FINAL_VAR(nested)"
-            result = find_final_answer(text, environment=env)
-            assert "'key': 'value'" in result or '"key": "value"' in result
-            assert "'num': 123" in result or '"num": 123' in result
-
-            # Test that variable updates are reflected
-            env.execute_code("x = 100")
-            text = "FINAL_VAR(x)"
-            result = find_final_answer(text, environment=env)
-            assert result == "100", f"Expected '100', got '{result}'"
-
-            # Non-existent variable: find_final_answer must return None (not the error string)
-            # so the RLM loop continues and the model can fix it
-            text = "FINAL_VAR(nonexistent)"
-            result = find_final_answer(text, environment=env)
-            assert result is None, "must return None for variable-not-found, not the error message"
+            result = env.execute_code('answer["content"] = "the result"\nanswer["ready"] = True')
+            assert result.final_answer == "the result"
         finally:
             env.cleanup()
 
-    def test_final_var_variable_not_found_returns_none(self):
-        """When env returns FINAL_VAR 'variable not found' error, find_final_answer must return None."""
-        mock_env = Mock()
-        mock_env.execute_code.return_value = REPLResult(
-            stdout="Error: Variable 'missing' not found. Available variables: []. You must create and assign a variable BEFORE calling FINAL_VAR on it.",
-            stderr="",
-            locals={},
-        )
-        result = find_final_answer("FINAL_VAR(missing)", environment=mock_env)
-        assert result is None
+    def test_answer_dict_unset_keeps_final_answer_none(self):
+        """If ``ready`` stays False, the REPL must not surface a final answer."""
+        env = LocalREPL()
+        try:
+            result = env.execute_code('answer["content"] = "wip"')
+            assert result.final_answer is None
+        finally:
+            env.cleanup()
+
+    def test_answer_dict_rebind_with_ready(self):
+        """Plain-dict rebind with ``ready=True`` must still be captured."""
+        env = LocalREPL()
+        try:
+            result = env.execute_code('answer = {"content": "rebound", "ready": True}')
+            assert result.final_answer == "rebound"
+        finally:
+            env.cleanup()
+
+    def test_answer_content_can_be_non_string(self):
+        """Any ``str()``-able content (numbers, lists) should be coerced to a string final answer."""
+        env = LocalREPL()
+        try:
+            result = env.execute_code('answer["content"] = [1, 2, 3]\nanswer["ready"] = True')
+            assert result.final_answer == "[1, 2, 3]"
+        finally:
+            env.cleanup()
 
 
 class TestFormatExecutionResult:
@@ -325,7 +161,8 @@ class TestFormatIteration:
         assert len(messages) == 2
         assert messages[0]["role"] == "assistant"
         assert messages[1]["role"] == "user"
-        assert "x = 1 + 2" in messages[1]["content"]
+        assert "REPL output:" in messages[1]["content"]
+        assert "3" in messages[1]["content"]
 
     def test_iteration_without_code_blocks(self):
         iteration = RLMIteration(

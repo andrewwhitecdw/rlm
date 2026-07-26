@@ -173,7 +173,7 @@ Environments must provide these globals to executed code:
 - `llm_query_batched(prompts, model=None)`: Batched plain LM completions
 - `rlm_query(prompt, model=None)`: Recursive child RLM call (own REPL + iteration). Falls back to `llm_query` at max depth.
 - `rlm_query_batched(prompts, model=None)`: Batched recursive child RLM calls
-- `FINAL_VAR(variable_name)`: For returning final answers
+- `answer`: A dict (`{"content": "", "ready": False}`); the model sets `answer["content"]` and `answer["ready"] = True` to return a final answer. The env surfaces the content on `REPLResult.final_answer` once `ready` flips truthy.
 - `SHOW_VARS()`: For listing available variables
 
 ### Example Structure
@@ -208,7 +208,7 @@ class MyEnvironment(NonIsolatedEnv):
 - Environment works with basic RLM completion calls
 - `cleanup()` properly releases all resources
 - Sub-LM calls work via `llm_query()` and `rlm_query()`
-- Reserved names (`llm_query`, `rlm_query`, `context`, `history`, `FINAL_VAR`, `SHOW_VARS`) are restored after each execution
+- Reserved names (`llm_query`, `rlm_query`, `context`, `history`, `answer`, `SHOW_VARS`) are restored after each execution
 
 ## Architecture: Environment ↔ LM Handler Communication
 

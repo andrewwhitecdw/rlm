@@ -16,8 +16,8 @@ RESERVED_TOOL_NAMES: frozenset[str] = frozenset(
         "llm_query_batched",
         "rlm_query",
         "rlm_query_batched",
-        "FINAL_VAR",
         "SHOW_VARS",
+        "answer",
         "context",
         "history",
     }
@@ -176,7 +176,8 @@ class SupportsCustomTools(Protocol):
         The following names cannot be used as custom tool names:
         - llm_query, llm_query_batched: Single LM completion functions (no tool access)
         - rlm_query, rlm_query_batched: Recursive RLM calls for deeper thinking subtasks
-        - FINAL_VAR, SHOW_VARS: Built-in helper functions
+        - SHOW_VARS: Built-in helper for listing REPL variables
+        - answer: The final-answer dict ({"content": ..., "ready": False})
         - context, history: The input context and conversation history variables
 
     EXAMPLE:
@@ -212,9 +213,12 @@ class BaseEnv(ABC):
             }
     """
 
-    def __init__(self, persistent: bool = False, depth: int = 1, **kwargs):
+    def __init__(
+        self, persistent: bool = False, depth: int = 1, max_concurrent_subcalls: int = 4, **kwargs
+    ):
         self.persistent = persistent
         self.depth = depth
+        self.max_concurrent_subcalls = max_concurrent_subcalls
         self.kwargs = kwargs
 
     @abstractmethod

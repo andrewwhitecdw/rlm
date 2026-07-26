@@ -30,12 +30,17 @@ def create_mock_lm(responses: list[str]) -> Mock:
     return mock
 
 
+def final(content: str) -> str:
+    """Render a model response that submits ``content`` as the final answer."""
+    return f"```repl\nanswer['content'] = {content!r}\nanswer['ready'] = True\n```"
+
+
 class TestMultiTurnPersistentEnvironment:
     """Tests for environment persistence across completion calls."""
 
     def test_environment_reused_in_persistent_mode(self):
         """Verify the same environment instance is reused across completion calls."""
-        responses = ["FINAL(answer from call)"]
+        responses = [final("answer from call")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -59,7 +64,7 @@ class TestMultiTurnPersistentEnvironment:
 
     def test_context_accumulation_across_calls(self):
         """Verify contexts accumulate: context_0, context_1, etc."""
-        responses = ["FINAL(got it)"]
+        responses = [final("got it")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -85,7 +90,7 @@ class TestMultiTurnPersistentEnvironment:
 
     def test_history_accumulation_across_calls(self):
         """Verify message histories accumulate: history_0, history_1, etc."""
-        responses = ["FINAL(done)"]
+        responses = [final("done")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -115,11 +120,11 @@ class TestMultiTurnPersistentEnvironment:
         """Variables computed in one completion should be available in subsequent ones."""
         first_responses = [
             "Let me compute something\n```repl\ncomputed_value = 42 * 2\nprint(computed_value)\n```",
-            "FINAL(84)",
+            final("84"),
         ]
         second_responses = [
             "```repl\nresult = computed_value + 10\nprint(result)\n```",
-            "FINAL(94)",
+            final("94"),
         ]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
@@ -146,7 +151,7 @@ class TestMultiTurnPromptAwareness:
 
     def test_prompt_includes_context_count(self):
         """Model should be informed about available contexts."""
-        responses = ["FINAL(ok)"]
+        responses = [final("ok")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -169,7 +174,7 @@ class TestMultiTurnPromptAwareness:
 
     def test_prompt_includes_history_count(self):
         """Model should be informed about available histories."""
-        responses = ["FINAL(ok)"]
+        responses = [final("ok")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -196,10 +201,10 @@ class TestMultiTurnCodeExecution:
 
     def test_can_access_previous_context_in_code(self):
         """Code should be able to reference earlier contexts."""
-        first_responses = ["FINAL(first done)"]
+        first_responses = [final("first done")]
         second_responses = [
             "```repl\nprint(f'First: {context_0}, Second: {context_1}')\n```",
-            "FINAL(printed both)",
+            final("printed both"),
         ]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
@@ -222,10 +227,10 @@ class TestMultiTurnCodeExecution:
 
     def test_can_access_history_in_code(self):
         """Code should be able to reference stored histories."""
-        first_responses = ["FINAL(first)"]
+        first_responses = [final("first")]
         second_responses = [
             "```repl\nprint(f'History entries: {len(history)}')\n```",
-            "FINAL(accessed history)",
+            final("accessed history"),
         ]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
@@ -252,7 +257,7 @@ class TestNonPersistentMode:
 
     def test_non_persistent_creates_fresh_environment(self):
         """Non-persistent mode should create new environment each call."""
-        responses = ["FINAL(done)"]
+        responses = [final("done")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -285,7 +290,7 @@ class TestPersistentModeResourceManagement:
 
     def test_context_manager_cleanup(self):
         """Environment should be cleaned up when exiting context manager."""
-        responses = ["FINAL(done)"]
+        responses = [final("done")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -303,7 +308,7 @@ class TestPersistentModeResourceManagement:
 
     def test_explicit_close(self):
         """Calling close() should clean up persistent environment."""
-        responses = ["FINAL(done)"]
+        responses = [final("done")]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:
             mock_lm = create_mock_lm(responses)
@@ -330,7 +335,7 @@ class TestPersistentModeValidation:
             RLM(
                 backend="openai",
                 backend_kwargs={"model_name": "test"},
-                environment="docker",  # Not supported for persistent
+                environment="modal",  # Isolated env without persistence support
                 persistent=True,
             )
 
@@ -345,6 +350,18 @@ class TestPersistentModeValidation:
         )
         assert rlm.persistent is True
 
+    def test_docker_environment_supported(self):
+        """Docker environment should support persistent mode (no error at init)."""
+        # Should not raise during validation (container is only created on
+        # completion(), so this stays lightweight).
+        rlm = RLM(
+            backend="openai",
+            backend_kwargs={"model_name": "test"},
+            environment="docker",
+            persistent=True,
+        )
+        assert rlm.persistent is True
+
 
 class TestMultiTurnEndToEnd:
     """End-to-end tests simulating realistic multi-turn usage."""
@@ -353,15 +370,15 @@ class TestMultiTurnEndToEnd:
         """Simulate a 3-turn conversation with context accumulation."""
         turn1_responses = [
             "Looking at the first document\n```repl\ndoc1_summary = 'Has info about cats'\nprint(doc1_summary)\n```",
-            "FINAL(Summarized first doc)",
+            final("Summarized first doc"),
         ]
         turn2_responses = [
             "Looking at second document and comparing\n```repl\ndoc2_summary = 'Has info about dogs'\nprint(f'Doc1: {doc1_summary}, Doc2: {doc2_summary}')\n```",
-            "FINAL(Compared both docs)",
+            final("Compared both docs"),
         ]
         turn3_responses = [
             "Final synthesis\n```repl\nfinal = f'Combined: {doc1_summary} and {doc2_summary} from context_2'\nprint(final)\n```",
-            "FINAL(synthesized all)",
+            final("synthesized all"),
         ]
 
         with patch.object(rlm_module, "get_client") as mock_get_client:

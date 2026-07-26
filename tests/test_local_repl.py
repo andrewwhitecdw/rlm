@@ -124,21 +124,34 @@ class TestLocalREPLContextManager:
 
 
 class TestLocalREPLHelpers:
-    """Tests for helper functions (FINAL_VAR, etc.)."""
+    """Tests for helper functions and the answer-dict completion signal."""
 
-    def test_final_var_existing(self):
-        """Test FINAL_VAR with existing variable."""
+    def test_answer_dict_defaults(self):
+        """The ``answer`` dict starts unready with empty content."""
         repl = LocalREPL()
-        repl.execute_code("answer = 42")
-        _ = repl.execute_code("result = FINAL_VAR('answer')")
-        assert repl.locals["result"] == "42"
+        assert repl.locals["answer"]["content"] == ""
+        assert repl.locals["answer"]["ready"] is False
         repl.cleanup()
 
-    def test_final_var_missing(self):
-        """Test FINAL_VAR with non-existent variable."""
+    def test_answer_ready_surfaces_final_answer(self):
+        """Setting ``answer['ready'] = True`` must surface ``content`` on REPLResult.final_answer."""
         repl = LocalREPL()
-        _ = repl.execute_code("result = FINAL_VAR('nonexistent')")
-        assert "Error" in repl.locals["result"]
+        result = repl.execute_code('answer["content"] = "the result"\nanswer["ready"] = True')
+        assert result.final_answer == "the result"
+        repl.cleanup()
+
+    def test_answer_ready_false_does_not_surface(self):
+        """Mutating ``content`` without flipping ``ready`` must not end the run."""
+        repl = LocalREPL()
+        result = repl.execute_code('answer["content"] = "still working"')
+        assert result.final_answer is None
+        repl.cleanup()
+
+    def test_answer_rebind_to_plain_dict(self):
+        """Rebinding ``answer`` to a plain dict with ready=True is still picked up."""
+        repl = LocalREPL()
+        result = repl.execute_code('answer = {"content": "rebound", "ready": True}')
+        assert result.final_answer == "rebound"
         repl.cleanup()
 
     def test_llm_query_no_handler(self):
@@ -199,14 +212,14 @@ class TestLocalREPLScaffoldRestoration:
         assert "Error" in repl.locals["r"]
         repl.cleanup()
 
-    def test_final_var_restored_after_overwrite(self):
-        """If the model overwrites FINAL_VAR, the next execution still has the real FINAL_VAR."""
+    def test_answer_rewrap_after_rebind(self):
+        """If the model rebinds ``answer`` to a plain dict, the next cell still triggers on ready=True."""
         repl = LocalREPL()
-        repl.execute_code("answer = 42")
-        repl.execute_code("FINAL_VAR = lambda x: 'overwritten'")
-
-        repl.execute_code("result = FINAL_VAR('answer')")
-        assert repl.locals["result"] == "42"
+        repl.execute_code('answer = {"content": "intermediate", "ready": False}')
+        # After scaffold restore, the rebound dict has been wrapped back into the
+        # tracking subclass; setting ready=True now must fire the capture callback.
+        result = repl.execute_code('answer["content"] = "done"; answer["ready"] = True')
+        assert result.final_answer == "done"
         repl.cleanup()
 
 

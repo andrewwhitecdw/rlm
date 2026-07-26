@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from typing import Any
 
@@ -20,6 +21,31 @@ from rlm.environments.base_env import (
     extract_tool_value,
     validate_custom_tools,
 )
+
+
+class _AnswerDict(dict):
+    """REPL-visible dict where ``answer["ready"] = True`` signals completion.
+
+    Behaves exactly like ``dict`` for the model, but invokes ``on_ready`` the
+    first time ``ready`` flips truthy. The callback receives the current
+    ``content``, lets the env capture it (in-process attr, broker push, etc.),
+    and the next ``execute_code`` will surface it as ``REPLResult.final_answer``.
+    """
+
+    def __init__(self, on_ready=None):
+        super().__init__()
+        super().__setitem__("content", "")
+        super().__setitem__("ready", False)
+        self._on_ready = on_ready
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if key == "ready" and value and self._on_ready is not None:
+            try:
+                self._on_ready(self.get("content", ""))
+            except Exception:
+                pass
+
 
 # =============================================================================
 # Safe Builtins
@@ -135,9 +161,15 @@ class LocalREPL(NonIsolatedEnv):
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
         compaction: bool = False,
+        max_concurrent_subcalls: int = 4,
         **kwargs,
     ):
-        super().__init__(persistent=persistent, depth=depth, **kwargs)
+        super().__init__(
+            persistent=persistent,
+            depth=depth,
+            max_concurrent_subcalls=max_concurrent_subcalls,
+            **kwargs,
+        )
 
         self.lm_handler_address = lm_handler_address
         self.subcall_fn = subcall_fn  # Callback for recursive RLM calls (depth > 1 support)
@@ -184,16 +216,20 @@ class LocalREPL(NonIsolatedEnv):
 
         # Track LLM calls made during code execution
         self._pending_llm_calls: list[RLMChatCompletion] = []
-        # When FINAL_VAR is called inside a REPL block, we store the value here for the main loop
+        # Captured the first time the model sets ``answer["ready"] = True``.
         self._last_final_answer: str | None = None
 
         # Add helper functions
-        self.globals["FINAL_VAR"] = self._final_var
         self.globals["SHOW_VARS"] = self._show_vars
         self.globals["llm_query"] = self._llm_query
         self.globals["llm_query_batched"] = self._llm_query_batched
         self.globals["rlm_query"] = self._rlm_query
         self.globals["rlm_query_batched"] = self._rlm_query_batched
+
+        # The model marks completion via ``answer["ready"] = True``; the
+        # custom dict captures the content as soon as that happens so we
+        # don't have to probe the namespace after every cell.
+        self.locals["answer"] = _AnswerDict(on_ready=self._capture_answer)
 
         # Add custom tools to globals
         # Tools can be either plain values or (value, description) tuples
@@ -205,35 +241,16 @@ class LocalREPL(NonIsolatedEnv):
                 # For non-callable values (constants, data), add to locals
                 self.locals[name] = value
 
-    def _final_var(self, variable_name: str | Any) -> str:
-        """Return the value of a variable as a final answer for the main model, or stringify a direct value."""
-        if not isinstance(variable_name, str):
-            answer = str(variable_name)
-            self._last_final_answer = answer
-            return answer
-        variable_name = variable_name.strip().strip("\"'")
-        if variable_name in self.locals:
-            answer = str(self.locals[variable_name])
-            self._last_final_answer = answer
-            return answer
-
-        # Provide helpful error message with available variables (do not set _last_final_answer)
-        available = [k for k in self.locals.keys() if not k.startswith("_")]
-        if available:
-            return (
-                f"Error: Variable '{variable_name}' not found. "
-                f"Available variables: {available}. "
-                f"You must create and assign a variable BEFORE calling FINAL_VAR on it."
-            )
-        return (
-            f"Error: Variable '{variable_name}' not found. "
-            f"No variables have been created yet. "
-            f"You must create and assign a variable in a REPL block BEFORE calling FINAL_VAR on it."
-        )
+    def _capture_answer(self, content: Any) -> None:
+        self._last_final_answer = str(content)
 
     def _show_vars(self) -> str:
         """Show all available variables in the REPL environment."""
-        available = {k: type(v).__name__ for k, v in self.locals.items() if not k.startswith("_")}
+        available = {
+            k: type(v).__name__
+            for k, v in self.locals.items()
+            if not k.startswith("_") and k != "answer"
+        }
         if not available:
             return "No variables created yet. Use ```repl``` blocks to create variables."
         return f"Available variables: {available}"
@@ -316,9 +333,13 @@ class LocalREPL(NonIsolatedEnv):
         return self._llm_query(prompt, model)
 
     def _rlm_query_batched(self, prompts: list[str], model: str | None = None) -> list[str]:
-        """Spawn recursive RLM sub-calls for multiple prompts.
+        """Spawn recursive RLM sub-calls for multiple prompts in parallel.
 
-        Each prompt gets its own child RLM for deeper thinking.
+        Each prompt gets its own child RLM for deeper thinking. When multiple
+        prompts are provided, subcalls run concurrently using a thread pool
+        (bounded by max_concurrent_subcalls) since they are independent and
+        I/O-bound. Results are returned in the same order as input prompts.
+
         Falls back to llm_query_batched if no recursive capability is configured.
 
         Args:
@@ -329,14 +350,47 @@ class LocalREPL(NonIsolatedEnv):
             List of responses in the same order as input prompts.
         """
         if self.subcall_fn is not None:
-            results = []
-            for prompt in prompts:
+            # For 0 or 1 prompts, no need for thread pool overhead
+            if len(prompts) <= 1:
+                results = []
+                for prompt in prompts:
+                    try:
+                        completion = self.subcall_fn(prompt, model)
+                        self._pending_llm_calls.append(completion)
+                        results.append(completion.response)
+                    except Exception as e:
+                        results.append(f"Error: RLM query failed - {e}")
+                return results
+
+            # Parallel execution for multiple prompts
+            max_workers = min(self.max_concurrent_subcalls, len(prompts))
+            # Pre-allocate result slots to preserve ordering
+            results: list[str] = [""] * len(prompts)
+            completions: list[tuple[int, RLMChatCompletion]] = []
+            lock = threading.Lock()
+
+            def _run_subcall(index: int, prompt: str) -> None:
                 try:
                     completion = self.subcall_fn(prompt, model)
-                    self._pending_llm_calls.append(completion)
-                    results.append(completion.response)
+                    with lock:
+                        completions.append((index, completion))
+                    results[index] = completion.response
                 except Exception as e:
-                    results.append(f"Error: RLM query failed - {e}")
+                    results[index] = f"Error: RLM query failed - {e}"
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_run_subcall, i, prompt) for i, prompt in enumerate(prompts)
+                ]
+                # Wait for all futures to complete; exceptions are captured inside _run_subcall
+                for future in as_completed(futures):
+                    future.result()  # Re-raises unexpected executor errors
+
+            # Append completions in original prompt order for deterministic metadata
+            completions.sort(key=lambda x: x[0])
+            for _, completion in completions:
+                self._pending_llm_calls.append(completion)
+
             return results
 
         # Fall back to plain batched LM call if no recursive capability
@@ -459,24 +513,36 @@ class LocalREPL(NonIsolatedEnv):
 
     def _restore_scaffold(self) -> None:
         """Restore scaffold names after execution so overwrites (e.g. context = 'x') don't persist."""
-        restorers: dict[str, Callable[[], Any]] = {
-            "llm_query": lambda: self._llm_query,
-            "llm_query_batched": lambda: self._llm_query_batched,
-            "rlm_query": lambda: self._rlm_query,
-            "rlm_query_batched": lambda: self._rlm_query_batched,
-            "FINAL_VAR": lambda: self._final_var,
-            "SHOW_VARS": lambda: self._show_vars,
-        }
         for name in RESERVED_TOOL_NAMES:
-            if name in restorers:
-                self.globals[name] = restorers[name]()
+            if name == "llm_query":
+                self.globals["llm_query"] = self._llm_query
+            elif name == "llm_query_batched":
+                self.globals["llm_query_batched"] = self._llm_query_batched
+            elif name == "rlm_query":
+                self.globals["rlm_query"] = self._rlm_query
+            elif name == "rlm_query_batched":
+                self.globals["rlm_query_batched"] = self._rlm_query_batched
+            elif name == "SHOW_VARS":
+                self.globals["SHOW_VARS"] = self._show_vars
+            elif name == "answer":
+                current = self.locals.get("answer")
+                # If the model rebound ``answer`` to a plain dict, the
+                # _AnswerDict callback never fired; capture content here if
+                # ``ready=True``, then re-wrap so the next cell signals.
+                if not isinstance(current, _AnswerDict):
+                    replacement = _AnswerDict(on_ready=self._capture_answer)
+                    if isinstance(current, dict):
+                        for k, v in current.items():
+                            dict.__setitem__(replacement, k, v)
+                        if current.get("ready") and self._last_final_answer is None:
+                            self._last_final_answer = str(current.get("content", ""))
+                    self.locals["answer"] = replacement
             elif name == "context" and "context_0" in self.locals:
                 self.locals["context"] = self.locals["context_0"]
-            elif name == "history":
-                if self.compaction:
-                    self.locals["history"] = self._compaction_history
-                elif "history_0" in self.locals:
-                    self.locals["history"] = self.locals["history_0"]
+            elif name == "history" and "history_0" in self.locals and not self.compaction:
+                self.locals["history"] = self.locals["history_0"]
+            elif name == "history" and self.compaction:
+                self.locals["history"] = self._compaction_history
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""
@@ -534,4 +600,5 @@ class LocalREPL(NonIsolatedEnv):
         if hasattr(self, "locals"):
             self.locals.clear()
 
-
+    def __del__(self):
+        self.cleanup()

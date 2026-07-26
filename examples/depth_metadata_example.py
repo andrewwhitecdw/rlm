@@ -107,7 +107,7 @@ def main():
     prompt = (
         "Use rlm_query() to ask the sub-model: 'What are the first 5 prime numbers? "
         "Reply with just the numbers separated by commas.' "
-        "Store the response in a variable called 'primes', then return it with FINAL_VAR('primes')."
+        "Store the response in a variable called 'primes', then set answer['content'] = primes and answer['ready'] = True."
     )
 
     print("Prompt:", prompt)

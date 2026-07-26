@@ -26,7 +26,6 @@ from rlm.utils.exceptions import (
 )
 from rlm.utils.parsing import (
     find_code_blocks,
-    find_final_answer,
     format_iteration,
 )
 from rlm.utils.prompts import (
@@ -70,10 +69,15 @@ class RLM:
         custom_sub_tools: dict[str, Any] | None = None,
         compaction: bool = False,
         compaction_threshold_pct: float = 0.85,
+        max_concurrent_subcalls: int = 4,
         on_subcall_start: Callable[[int, str, str], None] | None = None,
         on_subcall_complete: Callable[[int, str, float, str | None], None] | None = None,
         on_iteration_start: Callable[[int, int], None] | None = None,
         on_iteration_complete: Callable[[int, int, float], None] | None = None,
+        sampling_args: dict[str, Any] | None = None,
+        sub_sampling_args: dict[str, Any] | None = None,
+        orchestrator: bool = True,
+        user_prologue: str | None = None,
     ):
         """
         Args:
@@ -102,11 +106,37 @@ class RLM:
                 when root context reaches compaction_threshold_pct of the model's context limit.
             compaction_threshold_pct: When compaction is on, trigger summarization when root
                 message token count reaches this fraction of the model context limit (default 0.85).
+            max_concurrent_subcalls: Maximum number of parallel threads for rlm_query_batched subcalls.
+                Each child RLM runs in its own thread. Default 4.
             on_subcall_start: Callback fired when a child RLM starts. Args: (depth, model, prompt_preview).
             on_subcall_complete: Callback fired when a child RLM completes. Args: (depth, model, duration, error_or_none).
             on_iteration_start: Callback fired when an iteration starts. Args: (depth, iteration_num).
             on_iteration_complete: Callback fired when an iteration completes. Args: (depth, iteration_num, duration).
         """
+        # Sampling args plumbed into backend_kwargs / other_backend_kwargs
+        # before the clients are constructed, so they reach the chat-completions
+        # call (e.g. temperature, top_p, max_tokens, seed). ``sampling_args``
+        # applies to the root model (depth=0); ``sub_sampling_args`` to
+        # depth=1 sub-LLM calls. If ``sub_sampling_args`` is set without an
+        # ``other_backends``, we mirror the root backend so depth=1 routes
+        # through a separate client with its own sampling args.
+        if sampling_args is not None:
+            backend_kwargs = dict(backend_kwargs or {})
+            existing = dict(backend_kwargs.get("sampling_args") or {})
+            existing.update(sampling_args)
+            backend_kwargs["sampling_args"] = existing
+        if sub_sampling_args is not None:
+            if other_backends is None:
+                other_backends = [backend]
+                other_backend_kwargs = [dict(backend_kwargs or {})]
+            else:
+                other_backend_kwargs = [dict(kw or {}) for kw in (other_backend_kwargs or [{}])]
+            first = dict(other_backend_kwargs[0])
+            existing = dict(first.get("sampling_args") or {})
+            existing.update(sub_sampling_args)
+            first["sampling_args"] = existing
+            other_backend_kwargs[0] = first
+
         # Store config for spawning per-completion
         self.backend = backend
         self.backend_kwargs = (backend_kwargs or {}).copy()
@@ -132,6 +162,7 @@ class RLM:
 
         self.compaction = compaction
         self.compaction_threshold_pct = compaction_threshold_pct
+        self.max_concurrent_subcalls = max_concurrent_subcalls
 
         self.depth = depth
         self.max_depth = max_depth
@@ -141,6 +172,12 @@ class RLM:
         self.max_tokens = max_tokens
         self.max_errors = max_errors
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
+        self.orchestrator = orchestrator
+        # Optional user-prologue message inserted between the metadata user
+        # message and the iter-0 turn prompt. Mirrors RLMTrainEnv's
+        # ``user_prologue`` so canonical inference can match envs that
+        # depend on a task-specific tips message (e.g. BC+).
+        self.user_prologue = user_prologue
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
 
@@ -203,9 +240,16 @@ class RLM:
 
         lm_handler = LMHandler(client, other_backend_client=other_backend_client)
 
-        # Register other clients to be available as sub-call options (by model name)
-        if self.other_backends and self.other_backend_kwargs:
-            for backend, kwargs in zip(self.other_backends, self.other_backend_kwargs, strict=True):
+        # Register other clients to be available as sub-call options (by model name).
+        # Reuse other_backend_client for the first entry so each (backend, kwargs)
+        # pair is instantiated exactly once.
+        if other_backend_client is not None:
+            lm_handler.register_client(other_backend_client.model_name, other_backend_client)
+            for backend, kwargs in zip(
+                self.other_backends[1:],
+                self.other_backend_kwargs[1:],
+                strict=True,
+            ):
                 other_client: BaseLM = get_client(backend, kwargs)
                 lm_handler.register_client(other_client.model_name, other_client)
 
@@ -228,16 +272,19 @@ class RLM:
             env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
             env_kwargs["context_payload"] = prompt
             env_kwargs["depth"] = self.depth + 1  # Environment depth is RLM depth + 1
-            # For local environment with max_depth > 1, pass subcall callback for recursive RLM calls
-            if self.environment_type == "local" and self.max_depth > 1:
+            # For environments that support recursive RLM calls, pass the subcall
+            # callback when max_depth > 1. local/ipython invoke it in-process;
+            # docker invokes it via its host-side proxy (/rlm_query endpoints).
+            if self.environment_type in ("local", "ipython", "docker") and self.max_depth > 1:
                 env_kwargs["subcall_fn"] = self._subcall
             # Pass custom tools to the environment
             if self.custom_tools is not None:
                 env_kwargs["custom_tools"] = self.custom_tools
             if self.custom_sub_tools is not None:
                 env_kwargs["custom_sub_tools"] = self.custom_sub_tools
-            if self.compaction and self.environment_type == "local":
+            if self.compaction and self.environment_type in ("local", "docker"):
                 env_kwargs["compaction"] = True
+            env_kwargs["max_concurrent_subcalls"] = self.max_concurrent_subcalls
             environment: BaseEnv = get_environment(self.environment_type, env_kwargs)
 
             if self.persistent:
@@ -250,7 +297,11 @@ class RLM:
             if not self.persistent and hasattr(environment, "cleanup"):
                 environment.cleanup()
 
-    def _setup_prompt(self, prompt: str | dict[str, Any]) -> list[dict[str, Any]]:
+    def _setup_prompt(
+        self,
+        prompt: str | dict[str, Any],
+        root_prompt: str | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Setup the system prompt for the RLM. Also include metadata about the prompt and build
         up the initial message history.
@@ -260,7 +311,11 @@ class RLM:
             system_prompt=self.system_prompt,
             query_metadata=metadata,
             custom_tools=self.custom_tools,
+            root_prompt=root_prompt,
+            orchestrator=self.orchestrator,
         )
+        if self.user_prologue:
+            message_history.append({"role": "user", "content": self.user_prologue})
         if self.compaction:
             message_history[0]["content"] += (
                 "\n\nThe full conversation history (trajectory segments and any summaries) "
@@ -299,7 +354,7 @@ class RLM:
             self.logger.clear_iterations()
 
         with self._spawn_completion_context(prompt) as (lm_handler, environment):
-            message_history = self._setup_prompt(prompt)
+            message_history = self._setup_prompt(prompt, root_prompt=root_prompt)
 
             compaction_count = 0
             try:
@@ -322,7 +377,6 @@ class RLM:
                                 lm_handler, environment, message_history, compaction_count
                             )
 
-                    # Current prompt = message history + additional prompt suffix
                     context_count = (
                         environment.get_context_count()
                         if isinstance(environment, SupportsPersistence)
@@ -333,12 +387,22 @@ class RLM:
                         if isinstance(environment, SupportsPersistence)
                         else 0
                     )
-                    current_prompt = message_history + [
-                        build_user_prompt(root_prompt, i, context_count, history_count)
-                    ]
+                    # Fully prefixed trajectory: persist the per-turn user prompt
+                    # into message_history so the model sees a single continuous
+                    # [system, metadata, user_0, assistant_0, repl_0, user_1, ...]
+                    # chain across turns.
+                    message_history.append(
+                        build_user_prompt(
+                            root_prompt,
+                            i,
+                            context_count,
+                            history_count,
+                            max_iterations=self.max_iterations,
+                        )
+                    )
 
                     iteration: RLMIteration = self._completion_turn(
-                        prompt=current_prompt,
+                        prompt=message_history,
                         lm_handler=lm_handler,
                         environment=environment,
                     )
@@ -346,17 +410,14 @@ class RLM:
                     # Check error/budget/token limits after each iteration
                     self._check_iteration_limits(iteration, i, lm_handler)
 
-                    # Check if RLM is done and has a final answer.
-                    # Prefer FINAL_VAR result from REPL execution.
+                    # The REPL signals completion by populating
+                    # ``answer["content"]`` and setting ``answer["ready"] = True``.
+                    # Each environment surfaces that on ``REPLResult.final_answer``.
                     final_answer = None
                     for block in iteration.code_blocks:
-                        if getattr(block.result, "final_answer", None):
+                        if getattr(block.result, "final_answer", None) is not None:
                             final_answer = block.result.final_answer
                             break
-                    if final_answer is None:
-                        final_answer = find_final_answer(
-                            iteration.response, environment=environment
-                        )
                     iteration.final_answer = final_answer
 
                     # Store as best partial answer (most recent response with content)
@@ -765,6 +826,8 @@ class RLM:
             # Propagate custom tools to children (sub_tools become the child's tools)
             custom_tools=self.custom_sub_tools,
             custom_sub_tools=self.custom_sub_tools,
+            # Propagate concurrency settings to children
+            max_concurrent_subcalls=self.max_concurrent_subcalls,
             # Propagate callbacks to children for nested tracking
             on_subcall_start=self.on_subcall_start,
             on_subcall_complete=self.on_subcall_complete,
@@ -815,13 +878,13 @@ class RLM:
         - add_context(payload, index): Add new context for multi-turn conversations
         - get_context_count(): Return the number of loaded contexts
 
-        Currently only 'local' (LocalREPL) supports these methods.
+        Currently 'local', 'ipython', and 'docker' support these methods.
 
         Raises:
             ValueError: If the environment type does not support persistent mode.
         """
         # Known environments that support persistence
-        persistent_supported_environments = {"local"}
+        persistent_supported_environments = {"local", "ipython", "docker"}
 
         if self.environment_type not in persistent_supported_environments:
             raise ValueError(

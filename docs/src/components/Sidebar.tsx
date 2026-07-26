@@ -15,6 +15,7 @@ const navigation = [
     children: [
       { name: "Overview", href: "/environments" },
       { name: "LocalREPL", href: "/environments/local" },
+      { name: "IPythonREPL", href: "/environments/ipython" },
       { name: "DockerREPL", href: "/environments/docker" },
       { name: "ModalREPL", href: "/environments/modal" },
     ],

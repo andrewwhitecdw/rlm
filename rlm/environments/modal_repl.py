@@ -1,4 +1,6 @@
+import base64
 import json
+import textwrap
 import threading
 import time
 
@@ -28,14 +30,249 @@ def get_default_image() -> modal.Image:
 
 
 # =============================================================================
+# Broker Server Script (runs inside sandbox, handles LLM request queue)
+# =============================================================================
+
+_BROKER_SCRIPT = textwrap.dedent(
+    '''
+import json
+import threading
+import uuid
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# Request queue: {request_id: {"request": {...}, "response": None, "event": Event}}
+pending_requests = {}
+lock = threading.Lock()
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+@app.route("/enqueue", methods=["POST"])
+def enqueue():
+    """Called by sandbox code to submit an LLM request and wait for response."""
+    data = request.json
+    request_id = str(uuid.uuid4())
+    event = threading.Event()
+
+    with lock:
+        pending_requests[request_id] = {
+            "request": data,
+            "response": None,
+            "event": event,
+        }
+
+    # Wait for response (with timeout)
+    event.wait(timeout=300)
+
+    with lock:
+        entry = pending_requests.pop(request_id, None)
+
+    if entry and entry["response"] is not None:
+        return jsonify(entry["response"])
+    else:
+        return jsonify({"error": "Request timed out"}), 504
+
+@app.route("/pending")
+def get_pending():
+    """Called by ModalREPL to get pending requests."""
+    with lock:
+        pending = [
+            {"id": rid, "request": entry["request"]}
+            for rid, entry in pending_requests.items()
+            if entry["response"] is None
+        ]
+    return jsonify({"pending": pending})
+
+@app.route("/respond", methods=["POST"])
+def respond():
+    """Called by ModalREPL to submit a response."""
+    data = request.json
+    request_id = data.get("id")
+    response = data.get("response")
+
+    with lock:
+        if request_id in pending_requests:
+            pending_requests[request_id]["response"] = response
+            pending_requests[request_id]["event"].set()
+            return jsonify({"status": "ok"})
+
+    return jsonify({"error": "Request not found"}), 404
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080, threaded=True)
+'''
+)
+
+
+# =============================================================================
 # Execution Script (runs inside the sandbox for each code block)
 # =============================================================================
 
 
 def _build_exec_script(code: str, broker_port: int = 8080, depth: int = 1) -> str:
-    from rlm.environments._exec_templates import build_broker_exec_script
+    """
+    Build a script that executes code with state persistence.
+    LLM queries go through the local broker server.
+    """
+    code_b64 = base64.b64encode(code.encode()).decode()
 
-    return build_broker_exec_script(code, broker_port, depth)
+    return textwrap.dedent(
+        f'''
+import sys
+import io
+import json
+import base64
+import traceback
+import os
+import requests
+
+try:
+    import dill
+except ImportError:
+    import pickle as dill
+
+# =============================================================================
+# LLM Query Functions (via local broker)
+# =============================================================================
+
+BROKER_URL = "http://127.0.0.1:{broker_port}"
+
+def llm_query(prompt, model=None):
+    """Query the LM via the broker."""
+    try:
+        response = requests.post(
+            f"{{BROKER_URL}}/enqueue",
+            json={{"type": "single", "prompt": prompt, "model": model, "depth": {depth}}},
+            timeout=300,
+        )
+        data = response.json()
+        if data.get("error"):
+            return f"Error: {{data['error']}}"
+        return data.get("response", "Error: No response")
+    except Exception as e:
+        return f"Error: LM query failed - {{e}}"
+
+
+def llm_query_batched(prompts, model=None):
+    """Query the LM with multiple prompts."""
+    try:
+        response = requests.post(
+            f"{{BROKER_URL}}/enqueue",
+            json={{"type": "batched", "prompts": prompts, "model": model, "depth": {depth}}},
+            timeout=300,
+        )
+        data = response.json()
+        if data.get("error"):
+            return [f"Error: {{data['error']}}"] * len(prompts)
+        return data.get("responses", ["Error: No response"] * len(prompts))
+    except Exception as e:
+        return [f"Error: LM query failed - {{e}}"] * len(prompts)
+
+
+# =============================================================================
+# State Management
+# =============================================================================
+
+STATE_FILE = "/tmp/rlm_state.dill"
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "rb") as f:
+                return dill.load(f)
+        except:
+            pass
+    return {{}}
+
+def save_state(state):
+    clean_state = {{}}
+    for k, v in state.items():
+        if k.startswith("_"):
+            continue
+        try:
+            dill.dumps(v)
+            clean_state[k] = v
+        except:
+            pass
+    with open(STATE_FILE, "wb") as f:
+        dill.dump(clean_state, f)
+
+def serialize_locals(state):
+    result = {{}}
+    for k, v in state.items():
+        if k.startswith("_"):
+            continue
+        try:
+            result[k] = repr(v)
+        except:
+            result[k] = f"<{{type(v).__name__}}>"
+    return result
+
+# =============================================================================
+# Execution
+# =============================================================================
+
+_locals = load_state()
+
+if "answer" not in _locals or not isinstance(_locals.get("answer"), dict):
+    _locals["answer"] = {{"content": "", "ready": False}}
+
+def SHOW_VARS():
+    available = {{k: type(v).__name__ for k, v in _locals.items() if not k.startswith("_") and k != "answer"}}
+    if not available:
+        return "No variables created yet. Use ```repl``` blocks to create variables."
+    return f"Available variables: {{available}}"
+
+_globals = {{
+    "__builtins__": __builtins__,
+    "__name__": "__main__",
+    "llm_query": llm_query,
+    "llm_query_batched": llm_query_batched,
+    "SHOW_VARS": SHOW_VARS,
+}}
+
+code = base64.b64decode("{code_b64}").decode()
+
+stdout_buf = io.StringIO()
+stderr_buf = io.StringIO()
+old_stdout, old_stderr = sys.stdout, sys.stderr
+
+try:
+    sys.stdout = stdout_buf
+    sys.stderr = stderr_buf
+    combined = {{**_globals, **_locals}}
+    exec(code, combined, combined)
+    for key, value in combined.items():
+        if key not in _globals and not key.startswith("_"):
+            _locals[key] = value
+except Exception as e:
+    traceback.print_exc(file=stderr_buf)
+finally:
+    sys.stdout = old_stdout
+    sys.stderr = old_stderr
+
+# Restore scaffold aliases if overwritten by executed code
+if "context_0" in _locals:
+    _locals["context"] = _locals["context_0"]
+if "history_0" in _locals:
+    _locals["history"] = _locals["history_0"]
+
+save_state(_locals)
+
+_ans = _locals.get("answer") if isinstance(_locals.get("answer"), dict) else None
+_final = str(_ans.get("content", "")) if (_ans is not None and _ans.get("ready")) else None
+result = {{
+    "stdout": stdout_buf.getvalue(),
+    "stderr": stderr_buf.getvalue(),
+    "locals": serialize_locals(_locals),
+    "final_answer": _final,
+}}
+print(json.dumps(result))
+'''
+    )
 
 
 class ModalREPL(IsolatedEnv):
@@ -104,16 +341,14 @@ class ModalREPL(IsolatedEnv):
         )
 
         # Start the broker server in the sandbox
-        from rlm.environments._exec_templates import build_broker_script
-
         self.broker_process = self.sandbox.exec(
             "python",
             "-c",
-            build_broker_script(self.BROKER_PORT),
+            _BROKER_SCRIPT,
         )
 
         # Wait for broker to be ready
-        self._wait_for_broker()
+        time.sleep(2)
 
         # Get the tunnel URL
         tunnels = self.sandbox.tunnels()
@@ -125,24 +360,6 @@ class ModalREPL(IsolatedEnv):
             self.poller_stop.clear()
             self.poller_thread = threading.Thread(target=self._poll_broker, daemon=True)
             self.poller_thread.start()
-
-    def _wait_for_broker(self, max_attempts: int = 30):
-        """Wait for the broker to be ready by polling its health endpoint."""
-        health_check = (
-            f"import requests; "
-            f"r = requests.get('http://127.0.0.1:{self.BROKER_PORT}/health', timeout=2); "
-            f"print(r.text)"
-        )
-        for _ in range(max_attempts):
-            time.sleep(0.5)
-            try:
-                proc = self.sandbox.exec("python", "-c", health_check)
-                stdout = proc.stdout.read()
-                if "ok" in stdout.lower():
-                    return
-            except Exception:
-                pass
-        raise RuntimeError("Broker failed to start within the expected time")
 
     def _poll_broker(self):
         """Poll the broker for pending LLM requests and handle them."""
@@ -169,7 +386,9 @@ class ModalREPL(IsolatedEnv):
                         timeout=10,
                     )
 
-            except (requests.exceptions.RequestException, json.JSONDecodeError, KeyError):
+            except requests.exceptions.RequestException:
+                pass
+            except Exception:
                 pass
 
             time.sleep(0.1)
@@ -259,6 +478,7 @@ class ModalREPL(IsolatedEnv):
                 locals=result.get("locals", {}),
                 execution_time=execution_time,
                 rlm_calls=pending_calls,
+                final_answer=result.get("final_answer"),
             )
         except json.JSONDecodeError:
             return REPLResult(
@@ -291,4 +511,5 @@ class ModalREPL(IsolatedEnv):
         self.cleanup()
         return False
 
-
+    def __del__(self):
+        self.cleanup()

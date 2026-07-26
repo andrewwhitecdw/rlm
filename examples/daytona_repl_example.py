@@ -58,9 +58,8 @@ def main():
             print("Executed: print(x * 2)")
             print(f"Stdout: {result.stdout.strip()}")
 
-            result = repl.execute_code("answer = 42")
-            result = repl.execute_code('print(FINAL_VAR("answer"))')
-            print(f"FINAL_VAR('answer'): {result.stdout.strip()}")
+            result = repl.execute_code('answer["content"] = 42\nanswer["ready"] = True')
+            print(f"answer-dict final answer: {result.final_answer!r}")
 
         # Example 2: With LLM handler
         print("\n[2] Code execution with LLM handler")

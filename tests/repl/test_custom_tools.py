@@ -78,12 +78,12 @@ class TestValidateCustomTools:
 
     def test_multiple_reserved_names_all_reported(self):
         """When multiple reserved names are used, all should be reported."""
-        tools = {"llm_query": 1, "FINAL_VAR": 2, "valid_name": 3}
+        tools = {"llm_query": 1, "answer": 2, "valid_name": 3}
         with pytest.raises(ValueError) as exc_info:
             validate_custom_tools(tools)
         error_msg = str(exc_info.value)
         assert "llm_query" in error_msg
-        assert "FINAL_VAR" in error_msg
+        assert "answer" in error_msg
 
     def test_reserved_names_constant_is_frozen(self):
         """RESERVED_TOOL_NAMES should be immutable."""
@@ -187,14 +187,15 @@ class TestLocalREPLCustomTools:
         """Built-in REPL functions should still work with custom tools."""
         repl = LocalREPL(custom_tools=custom_tools)
 
-        # FINAL_VAR should still work
-        repl.execute_code("answer = double(21)")
-        result = repl.execute_code('print(FINAL_VAR("answer"))')
-        assert "42" in result.stdout
+        # The ``answer`` dict completion signal should still work alongside tools.
+        result = repl.execute_code('answer["content"] = double(21)\nanswer["ready"] = True')
+        assert result.final_answer == "42"
 
-        # SHOW_VARS should still work
+        # SHOW_VARS should still work (and skip the reserved ``answer`` slot).
+        repl.execute_code("my_var = 7")
         result = repl.execute_code("print(SHOW_VARS())")
-        assert "answer" in result.stdout
+        assert "my_var" in result.stdout
+        assert "answer" not in result.stdout
 
         repl.cleanup()
 

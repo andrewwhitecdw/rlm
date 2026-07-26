@@ -72,12 +72,13 @@ export default function EnvironmentsPage() {
 
       <div className="my-12">
         <h2 className="text-2xl font-bold mb-4">Available Environments</h2>
-        <Table 
+        <Table
           headers={["Environment", "Isolation", "Best For"]}
           rows={[
             [<Link key="1" href="/environments/local" className="text-primary hover:underline"><code>local</code></Link>, "Non-isolated", "Development"],
-            [<Link key="2" href="/environments/docker" className="text-primary hover:underline"><code>docker</code></Link>, "Non-isolated", "CI/CD, reproducibility"],
-            [<Link key="3" href="/environments/modal" className="text-primary hover:underline"><code>modal</code></Link>, "Isolated", "Production"],
+            [<Link key="2" href="/environments/ipython" className="text-primary hover:underline"><code>ipython</code></Link>, "Non-isolated (in-process) / Isolated host process (subprocess)", "Cells with magics, hard cell timeouts"],
+            [<Link key="3" href="/environments/docker" className="text-primary hover:underline"><code>docker</code></Link>, "Non-isolated", "CI/CD, reproducibility"],
+            [<Link key="4" href="/environments/modal" className="text-primary hover:underline"><code>modal</code></Link>, "Isolated", "Production"],
           ]}
         />
       </div>

@@ -106,8 +106,8 @@ def main():
         "  1. 'What are the first 5 prime numbers? Reply with just the numbers.'\n"
         "  2. 'What are the first 5 even numbers? Reply with just the numbers.'\n"
         "  3. 'What are the first 5 square numbers? Reply with just the numbers.'\n"
-        "Store the list of responses in a variable called 'answers', "
-        "then return it with FINAL_VAR(answers)."
+        "Store the list of responses in a variable called 'responses', "
+        "then set answer['content'] = responses and answer['ready'] = True."
     )
 
     print("Prompt:", prompt)
